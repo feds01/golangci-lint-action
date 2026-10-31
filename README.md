@@ -421,6 +421,9 @@ Show only new issues.
 The default value is `false`.
 
 * `pull_request` and `pull_request_target`: the action gets the diff of the PR content from the [GitHub API](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28#get-a-pull-request) and uses it with `--new-from-patch`.
+  If the diff cannot be fetched (e.g. a PR with more than 300 files), the action uses the `--new-from-rev` option with the base commit of the PR instead (relies on git).
+  The action fetches the base commit with `git fetch --depth=1` and fails if it cannot get it.
+  With `pull_request_target`, you should check out the PR head (`ref: ${{ github.event.pull_request.head.sha }}`).
 * `push`: the action gets the diff of the push content (the difference between commits before and after the push) from the [GitHub API](https://docs.github.com/en/rest/commits/commits?apiVersion=2022-11-28#compare-two-commits) and uses it with `--new-from-patch`.
 * `merge_group`: the action gets the diff by using the `--new-from-rev` option (relies on git).
   You should add the option `fetch-depth: 0` to the `actions/checkout` step.
