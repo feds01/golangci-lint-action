@@ -69672,6 +69672,51 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
+/***/ 6529:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.fetchBaseRev = fetchBaseRev;
+const child_process_1 = __nccwpck_require__(35317);
+const util_1 = __nccwpck_require__(39023);
+const execFileCommand = (0, util_1.promisify)(child_process_1.execFile);
+const CREDENTIALS_ERROR = /authenticat|credentials|username|denied|\b40[13]\b/i;
+const credentialsHint = ` (git credentials may be missing: see persist-credentials of actions/checkout)`;
+async function git(cwd, ...args) {
+    const { stdout } = await execFileCommand(`git`, args, { cwd });
+    return stdout.trim();
+}
+// Fails instead of returning nothing: linting everything would report issues that are not part of the pull request.
+async function fetchBaseRev(baseSha, options = {}) {
+    const { cwd } = options;
+    if (!baseSha || !/^[0-9a-f]{40,64}$/.test(baseSha)) {
+        throw new Error(`cannot show only new issues: the pull request base commit is unknown (${baseSha})`);
+    }
+    try {
+        await git(cwd, `cat-file`, `-e`, `${baseSha}^{commit}`);
+    }
+    catch {
+        try {
+            await git(cwd, `fetch`, `--no-tags`, `--depth=1`, `origin`, baseSha);
+        }
+        catch (err) {
+            // err.message embeds the git command line, which contains the commit sha: match git's own output only.
+            const hint = options.fetchFailureHint ?? (CREDENTIALS_ERROR.test(err.stderr ?? ``) ? credentialsHint : ``);
+            throw new Error(`cannot show only new issues: failed to fetch the pull request base commit ${baseSha} from origin${hint}: ${err.message}`);
+        }
+    }
+    // Diffing the base commit against itself is empty, which would hide every issue.
+    if ((await git(cwd, `rev-parse`, `HEAD`)) === baseSha) {
+        throw new Error(`cannot show only new issues: the checkout is the pull request base commit ${baseSha}, not the pull request`);
+    }
+    return baseSha;
+}
+
+
+/***/ }),
+
 /***/ 97377:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -70082,6 +70127,45 @@ function getAssetURL(versionInfo) {
 
 /***/ }),
 
+/***/ 68997:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PatchFetchError = void 0;
+exports.newIssuesArgs = newIssuesArgs;
+exports.resolveNewIssuesSource = resolveNewIssuesSource;
+class PatchFetchError extends Error {
+}
+exports.PatchFetchError = PatchFetchError;
+const NEW_FROM_FLAGS = [`new-from-patch`, `new-from-rev`, `new-from-merge-base`];
+function newIssuesArgs(source) {
+    return [
+        `--${source.flag}=${source.value}`,
+        // Override config values.
+        `--new=false`,
+        ...NEW_FROM_FLAGS.filter((flag) => flag !== source.flag).map((flag) => `--${flag}=`),
+    ];
+}
+// Only pull requests can fall back to the base commit: for a push the checkout does not contain the "before" commit.
+async function resolveNewIssuesSource(eventName, deps) {
+    try {
+        const patchPath = await deps.fetchPatch();
+        return patchPath ? { flag: `new-from-patch`, value: patchPath } : undefined;
+    }
+    catch (err) {
+        if (!(err instanceof PatchFetchError) || !(eventName === `pull_request` || eventName === `pull_request_target`)) {
+            throw err;
+        }
+        deps.warn(`${err.message}: using a git diff against the pull request base commit instead`);
+        return { flag: `new-from-rev`, value: await deps.fetchBaseRev() };
+    }
+}
+
+
+/***/ }),
+
 /***/ 47161:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -70125,7 +70209,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.isOnlyNewIssues = isOnlyNewIssues;
-exports.fetchPatch = fetchPatch;
+exports.fetchNewIssuesSource = fetchNewIssuesSource;
 const core = __importStar(__nccwpck_require__(37484));
 const github = __importStar(__nccwpck_require__(93228));
 const pluginRetry = __importStar(__nccwpck_require__(33450));
@@ -70133,11 +70217,27 @@ const fs_1 = __importDefault(__nccwpck_require__(79896));
 const path_1 = __importDefault(__nccwpck_require__(16928));
 const tmp_1 = __nccwpck_require__(51288);
 const util_1 = __nccwpck_require__(39023);
+const baseRev_1 = __nccwpck_require__(6529);
+const newIssues_1 = __nccwpck_require__(68997);
 const diffUtils_1 = __nccwpck_require__(43441);
 const writeFile = (0, util_1.promisify)(fs_1.default.writeFile);
 const createTempDir = (0, util_1.promisify)(tmp_1.dir);
 function isOnlyNewIssues() {
     return core.getBooleanInput(`only-new-issues`, { required: true });
+}
+const PULL_REQUEST_TARGET_FETCH_HINT = ` (with pull_request_target, origin may be the pull request head repository, which can lack the base commit)`;
+async function fetchNewIssuesSource() {
+    const ctx = github.context;
+    if (ctx.eventName === `merge_group`) {
+        return { flag: `new-from-rev`, value: ctx.payload.merge_group.base_sha };
+    }
+    return (0, newIssues_1.resolveNewIssuesSource)(ctx.eventName, {
+        fetchPatch,
+        fetchBaseRev: () => (0, baseRev_1.fetchBaseRev)(ctx.payload.pull_request?.base.sha, {
+            fetchFailureHint: ctx.eventName === `pull_request_target` ? PULL_REQUEST_TARGET_FETCH_HINT : undefined,
+        }),
+        warn: core.warning,
+    });
 }
 async function fetchPatch() {
     const ctx = github.context;
@@ -70147,8 +70247,6 @@ async function fetchPatch() {
             return await fetchPullRequestPatch(ctx);
         case `push`:
             return await fetchPushPatch(ctx);
-        case `merge_group`:
-            return ``;
         default:
             core.info(`Not fetching patch for showing only new issues because it's not a pull request context: event name is ${ctx.eventName}`);
             return ``;
@@ -70157,13 +70255,12 @@ async function fetchPatch() {
 async function fetchPullRequestPatch(ctx) {
     const pr = ctx.payload.pull_request;
     if (!pr) {
-        core.warning(`No pull request in context`);
-        return ``;
+        throw new Error(`cannot show only new issues: no pull request in the ${ctx.eventName} event payload`);
     }
     const octokit = github.getOctokit(core.getInput(`github-token`, { required: true }), {}, pluginRetry.retry);
-    let patch;
+    let patchResp;
     try {
-        const patchResp = await octokit.rest.pulls.get({
+        patchResp = await octokit.rest.pulls.get({
             owner: ctx.repo.owner,
             repo: ctx.repo.repo,
             [`pull_number`]: pr.number,
@@ -70171,26 +70268,24 @@ async function fetchPullRequestPatch(ctx) {
                 format: `diff`,
             },
         });
-        if (patchResp.status !== 200) {
-            core.warning(`failed to fetch pull request patch: response status is ${patchResp.status}`);
-            return ``; // don't fail the action, but analyze without patch
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        patch = patchResp.data;
     }
     catch (err) {
         console.warn(`failed to fetch pull request patch:`, err);
-        return ``; // don't fail the action, but analyze without patch
+        throw new newIssues_1.PatchFetchError(`failed to fetch pull request patch: ${err.message}`);
+    }
+    if (patchResp.status !== 200) {
+        throw new newIssues_1.PatchFetchError(`failed to fetch pull request patch: response status is ${patchResp.status}`);
     }
     try {
         const patchPath = await createTempDir().then((tempDir) => path_1.default.join(tempDir, "pull.patch"));
         core.info(`Writing patch to ${patchPath}`);
-        await writeFile(patchPath, (0, diffUtils_1.alterDiffPatch)(patch));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await writeFile(patchPath, (0, diffUtils_1.alterDiffPatch)(patchResp.data));
         return patchPath;
     }
     catch (err) {
         console.warn(`failed to save pull request patch:`, err);
-        return ``; // don't fail the action, but analyze without patch
+        throw new newIssues_1.PatchFetchError(`failed to save pull request patch: ${err.message}`);
     }
 }
 async function fetchPushPatch(ctx) {
@@ -70391,6 +70486,7 @@ const path = __importStar(__nccwpck_require__(16928));
 const util_1 = __nccwpck_require__(39023);
 const cache_1 = __nccwpck_require__(97377);
 const install_1 = __nccwpck_require__(90232);
+const newIssues_1 = __nccwpck_require__(68997);
 const patch_1 = __nccwpck_require__(47161);
 const plugins = __importStar(__nccwpck_require__(96067));
 const execCommand = (0, util_1.promisify)(child_process_1.exec);
@@ -70421,30 +70517,10 @@ async function runGolangciLint(binPath, rootDir) {
             userArgNames.has(`new-from-merge-base`)) {
             throw new Error(`please, don't specify manually --new* args when requesting only new issues`);
         }
-        const ctx = github.context;
-        const patchPath = await (0, patch_1.fetchPatch)();
-        core.info(`only new issues on ${ctx.eventName}: ${patchPath}`);
-        switch (ctx.eventName) {
-            case `pull_request`:
-            case `pull_request_target`:
-            case `push`:
-                if (patchPath) {
-                    addedArgs.push(`--new-from-patch=${patchPath}`);
-                    // Override config values.
-                    addedArgs.push(`--new=false`);
-                    addedArgs.push(`--new-from-rev=`);
-                    addedArgs.push(`--new-from-merge-base=`);
-                }
-                break;
-            case `merge_group`:
-                addedArgs.push(`--new-from-rev=${ctx.payload.merge_group.base_sha}`);
-                // Override config values.
-                addedArgs.push(`--new=false`);
-                addedArgs.push(`--new-from-patch=`);
-                addedArgs.push(`--new-from-merge-base=`);
-                break;
-            default:
-                break;
+        const source = await (0, patch_1.fetchNewIssuesSource)();
+        core.info(`only new issues on ${github.context.eventName}: ${source?.flag === `new-from-patch` ? source.value : ``}`);
+        if (source) {
+            addedArgs.push(...(0, newIssues_1.newIssuesArgs)(source));
         }
     }
     const cmdArgs = {};
