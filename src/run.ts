@@ -7,7 +7,8 @@ import { promisify } from "util"
 
 import { restoreCache, saveCache } from "./cache"
 import { install } from "./install"
-import { fetchPatch, isOnlyNewIssues } from "./patch"
+import { newIssuesArgs } from "./newIssues"
+import { fetchNewIssuesSource, isOnlyNewIssues } from "./patch"
 import * as plugins from "./plugins"
 
 const execCommand = promisify(exec)
@@ -51,34 +52,12 @@ async function runGolangciLint(binPath: string, rootDir: string): Promise<void> 
       throw new Error(`please, don't specify manually --new* args when requesting only new issues`)
     }
 
-    const ctx = github.context
-    const patchPath = await fetchPatch()
+    const source = await fetchNewIssuesSource()
 
-    core.info(`only new issues on ${ctx.eventName}: ${patchPath}`)
+    core.info(`only new issues on ${github.context.eventName}: ${source?.flag === `new-from-patch` ? source.value : ``}`)
 
-    switch (ctx.eventName) {
-      case `pull_request`:
-      case `pull_request_target`:
-      case `push`:
-        if (patchPath) {
-          addedArgs.push(`--new-from-patch=${patchPath}`)
-
-          // Override config values.
-          addedArgs.push(`--new=false`)
-          addedArgs.push(`--new-from-rev=`)
-          addedArgs.push(`--new-from-merge-base=`)
-        }
-        break
-      case `merge_group`:
-        addedArgs.push(`--new-from-rev=${ctx.payload.merge_group.base_sha}`)
-
-        // Override config values.
-        addedArgs.push(`--new=false`)
-        addedArgs.push(`--new-from-patch=`)
-        addedArgs.push(`--new-from-merge-base=`)
-        break
-      default:
-        break
+    if (source) {
+      addedArgs.push(...newIssuesArgs(source))
     }
   }
 
